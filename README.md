@@ -1,4 +1,3 @@
-# Event_Check_In
 
 # Event Check-In
 
