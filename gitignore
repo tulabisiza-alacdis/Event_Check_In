@@ -1,0 +1,11 @@
+# NEVER upload signing keys or passwords
+*.keystore
+*.jks
+signing-key-info.txt
+
+# Android / Gradle build output
+.gradle/
+build/
+app/build/
+local.properties
+node_modules/
