@@ -22,7 +22,7 @@ HTML, Tailwind CSS (CDN), JavaScript, `html5-qrcode`, `qrcodejs`, Service Worker
 |---|---|
 | `index.html` | The whole app (UI and logic) |
 | `manifest.json`, `sw.js`, `icon-*.png` | PWA manifest, service worker, icons |
-| `backend/Code.gs` | Google Apps Script backend (paste into the Sheet's Apps Script editor) |
+| `code.js` | Google Apps Script backend (paste its contents into the Sheet's Apps Script editor) |
 | `android/twa-manifest.json` | Bubblewrap configuration used to build the APK |
 | `docs/SETUP.md` | Detailed setup guide |
 
@@ -33,7 +33,7 @@ HTML, Tailwind CSS (CDN), JavaScript, `html5-qrcode`, `qrcodejs`, Service Worker
 
 ## Set up your own backend
 1. Create a Google Sheet, then **Extensions > Apps Script**.
-2. Paste `backend/Code.gs`, run `setup` once, and approve permissions.
+2. Delete the default code and paste the contents of `code.js`, run `setup` once, and approve permissions.
 3. **Deploy > New deployment > Web app**, Execute as **Me**, access **Anyone**.
 4. Copy the `/exec` URL and paste it in the app on the start screen.
 
