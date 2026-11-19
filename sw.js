@@ -1,6 +1,6 @@
 /* OrgPass service worker: offline-first app shell + CDN libraries. */
-const CACHE = 'orgpass-v2';
-const SHELL = ['./', './index.html', './manifest.json'];
+const CACHE = 'orgpass-v3';
+const SHELL = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png', './icon-maskable-512.png'];
 const CDN = [
   'https://cdn.tailwindcss.com',
   'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js',
