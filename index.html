@@ -163,6 +163,7 @@ let tab = 'dashboard';
 let roleFilter = 'All', statusFilter = 'All', attLimit = 100;
 let query = '', walkinPrefill = '';
 let formOpen = false;
+let bulkCancel = false;     // set when the bulk QR download is cancelled
 let dashRole = 'All';        // which group the dashboard chart is showing
 
 /* Demo / Offline Mode sample data (only used when the officer taps the Demo button) */
@@ -397,7 +398,7 @@ function search(q) {
 
 /* ---------- Modal ---------- */
 function openModal(html) { const m = $('#modal'); m.innerHTML = html; m.classList.remove('hidden'); }
-function closeModal() { stopScanner(); const m = $('#modal'); m.classList.add('hidden'); m.innerHTML = ''; }
+function closeModal() { bulkCancel = true; stopScanner(); const m = $('#modal'); m.classList.add('hidden'); m.innerHTML = ''; }
 
 /* ---------- QR pass ---------- */
 function openPass(code) {
@@ -425,10 +426,8 @@ function openPass(code) {
   new QRCode($('#qrBox'), { text: g.code, width: 200, height: 200, colorDark: '#1E2833', colorLight: '#FFFFFF', correctLevel: QRCode.CorrectLevel.M });
 }
 
-function downloadPass(code) {
-  const g = findByCode(norm(code));
-  const qc = $('#qrBox canvas');
-  if (!g || !qc) { toast('QR not ready yet.'); return; }
+/** Draws the branded ticket on a canvas. qc = the QR code already rendered on a canvas. */
+function drawPassCanvas(g, qc) {
   const W = 640, H = 960, c = document.createElement('canvas');
   c.width = W; c.height = H;
   const x = c.getContext('2d');
@@ -455,9 +454,96 @@ function downloadPass(code) {
   x.fillText(g.code, W / 2, 862);
   x.font = '400 22px system-ui, sans-serif'; x.fillStyle = 'rgba(255,255,255,.75)';
   x.fillText('Show this QR code at the door', W / 2, 915);
+  return c;
+}
+
+function downloadPass(code) {
+  const g = findByCode(norm(code));
+  const qc = $('#qrBox canvas');
+  if (!g || !qc) { toast('QR not ready yet.'); return; }
   const a = document.createElement('a');
-  a.href = c.toDataURL('image/png'); a.download = `OrgPass-${g.code}.png`;
+  a.href = drawPassCanvas(g, qc).toDataURL('image/png'); a.download = `OrgPass-${g.code}.png`;
   document.body.appendChild(a); a.click(); a.remove();
+}
+
+/* ---------- Bulk QR passes (ZIP, no library needed) ---------- */
+const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(u8) { let c = 0xFFFFFFFF; for (let i = 0; i < u8.length; i++) c = CRC_T[(c ^ u8[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+
+/** Builds a ZIP (stored, no compression: PNGs are already compressed). files = [{name, data: Uint8Array}] */
+function makeZip(files) {
+  const enc = new TextEncoder(), parts = [], central = [];
+  let offset = 0;
+  const d = new Date();
+  const dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+  const dosDate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  for (const f of files) {
+    const name = enc.encode(f.name), crc = crc32(f.data), size = f.data.length;
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true);
+    lh.setUint16(10, dosTime, true); lh.setUint16(12, dosDate, true);
+    lh.setUint32(14, crc, true); lh.setUint32(18, size, true); lh.setUint32(22, size, true); lh.setUint16(26, name.length, true);
+    parts.push(lh.buffer, name, f.data);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true);
+    ch.setUint16(12, dosTime, true); ch.setUint16(14, dosDate, true);
+    ch.setUint32(16, crc, true); ch.setUint32(20, size, true); ch.setUint32(24, size, true); ch.setUint16(28, name.length, true);
+    ch.setUint32(42, offset, true);
+    central.push(ch.buffer, name);
+    offset += 30 + name.length + size;
+  }
+  let cdSize = 0; central.forEach((p) => { cdSize += p.byteLength; });
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+  end.setUint32(12, cdSize, true); end.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, end.buffer], { type: 'application/zip' });
+}
+
+async function downloadAllPasses() {
+  const list = attendeeList();
+  if (!list.length) { toast('No attendees match the current filters.'); return; }
+  if (typeof QRCode === 'undefined') { toast('QR library not loaded. Open the app online once.'); return; }
+  bulkCancel = false;
+  openModal(`<div class="w-full max-w-sm card p-5 text-center">
+    <h2 class="text-lg font-bold">Preparing QR passes…</h2>
+    <p id="bulkMsg" class="mt-2 text-base">0 of ${list.length}</p>
+    <div class="h-3 rounded-full mt-3" style="background:rgba(9,61,94,.14)"><div id="bulkBar" class="h-3 rounded-full" style="background:#FFBE33;width:0%"></div></div>
+    <p class="text-[14px] mt-3" style="color:rgba(30,40,51,.7)">Keep this screen open until the download starts.</p>
+    <button data-act="closeModal" class="btn-line rounded-xl py-3 w-full mt-4">Cancel</button></div>`);
+  const box = document.createElement('div');
+  box.style.cssText = 'position:fixed;left:-9999px;top:0;width:400px;height:400px';
+  document.body.appendChild(box);
+  const files = [], used = {};
+  try {
+    const qr = new QRCode(box, { text: 'OrgPass', width: 380, height: 380, colorDark: '#1E2833', colorLight: '#FFFFFF', correctLevel: QRCode.CorrectLevel.M });
+    for (let i = 0; i < list.length && !bulkCancel; i++) {
+      const g = list[i];
+      qr.makeCode(g.code);
+      const c = drawPassCanvas(g, box.querySelector('canvas'));
+      const blob = await new Promise((res) => c.toBlob(res, 'image/png'));
+      const data = new Uint8Array(await blob.arrayBuffer());
+      let base = (g.code + '-' + g.name).replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'pass';
+      used[base] = (used[base] || 0) + 1;
+      if (used[base] > 1) base += '_' + used[base];
+      files.push({ name: base + '.png', data });
+      const m = $('#bulkMsg'), bar = $('#bulkBar');
+      if (m) m.textContent = `${i + 1} of ${list.length}`;
+      if (bar) bar.style.width = Math.round(((i + 1) / list.length) * 100) + '%';
+      await new Promise((res) => setTimeout(res, 0));       // let the screen update
+    }
+  } catch (e) {
+    box.remove(); closeModal(); toast('Could not create the passes: ' + (e.message || e)); return;
+  }
+  box.remove();
+  const cancelled = bulkCancel;
+  closeModal();
+  if (cancelled) { toast('Cancelled.'); return; }
+  const url = URL.createObjectURL(makeZip(files));
+  const a = document.createElement('a');
+  a.href = url; a.download = `OrgPass-QR-Passes-${todayStr()}.zip`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  toast(`Downloaded ${files.length} QR pass${files.length === 1 ? '' : 'es'} (ZIP).`);
 }
 
 /* ---------- CSV ---------- */
@@ -732,6 +818,12 @@ function guestStatusBadge(g) {
 }
 const roleTag = (r) => `<span class="inline-block rounded-md px-2 py-0.5 text-[13px] font-semibold" style="background:#EEF2F6;color:#1E2833">${esc(r)}</span>`;
 
+function attendeeList() {
+  return S.guests
+    .filter((g) => (roleFilter === 'All' || g.role === roleFilter) && (statusFilter === 'All' || g.status === statusFilter))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function renderAttendees() {
   const el = $('#att'); if (!el) return;
   const count = (r) => (r === 'All' ? S.guests.length : S.guests.filter((g) => g.role === r).length);
@@ -740,12 +832,13 @@ function renderAttendees() {
     return `<button data-act="role" data-role="${r}" class="shrink-0 rounded-full px-4 py-2 text-[15px] font-semibold" style="${on ? 'background:#093D5E;color:#fff' : 'background:#fff;color:#1E2833;border:1.5px solid #CBD5E1'}">${r === 'All' ? 'All' : PLURAL[r]} ${count(r)}</button>`;
   }).join('');
   const seg = ['All', 'Present', 'Absent'].map((s) => `<button data-act="status" data-status="${s}" class="flex-1 rounded-lg py-2 text-[15px] font-semibold" style="${statusFilter === s ? 'background:#093D5E;color:#fff' : 'color:#1E2833'}">${s}</button>`).join('');
-  let list = S.guests.filter((g) => (roleFilter === 'All' || g.role === roleFilter) && (statusFilter === 'All' || g.status === statusFilter));
-  list = list.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const list = attendeeList();
   const shown = list.slice(0, attLimit);
   el.innerHTML = `
     <div class="flex gap-2 overflow-x-auto hide-scroll pb-2 -mx-4 px-4">${pills}</div>
     <div class="flex p-1 rounded-xl mt-2" style="background:#E2E8F0">${seg}</div>
+    <button data-act="dlAll" class="btn-navy rounded-xl py-3 w-full mt-3 flex items-center justify-center gap-2" ${list.length ? '' : 'disabled style="opacity:.5"'}>${IC.qr(20)}<span>Download all QR passes (${list.length})</span></button>
+    <p class="text-[13px] mt-1 text-center" style="color:rgba(30,40,51,.7)">Saves one ZIP of PNG tickets for the guests shown below.</p>
     <div class="grid gap-3 mt-4">
       ${shown.map((g) => `<div class="card p-3 flex items-center gap-3">
         <div class="min-w-0 flex-1">
@@ -962,6 +1055,7 @@ document.addEventListener('click', (e) => {
     case 'dashRole': dashRole = d.role; renderDashboard(); break;
     case 'viewPresent': roleFilter = 'All'; statusFilter = 'Present'; attLimit = 100; showTab('attendees'); break;
     case 'qr': openPass(d.code); break;
+    case 'dlAll': downloadAllPasses(); break;
     case 'dlPass': downloadPass(d.code); break;
     case 'closeModal': closeModal(); break;
     case 'scan': openScanner(); break;
